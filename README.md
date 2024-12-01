@@ -1,7 +1,11 @@
 
 ## Introduction
 
-This project contains the data used in an analysis of the Academ-AI repository (<https://www.academ-ai.info>).
+This repository contains the data used in an analysis of the Academ-AI repository (<https://www.academ-ai.info>). The data are also available from the Open Science Framework.[^osf] The analysis document can be found on arXiv.[^arxiv]
+
+[^osf]: Glynn A. Academ-AI Analysis. Charlottesville, VA: Open science Framework; 2024. doi:  [10.17605/OSF.IO/S4YGV](https://doi.org/10.17605/OSF.IO/S4YGV)
+
+[^arxiv]: Glynn A. Suspected Undeclared Use of Artificial Intelligence in the Academic Literature: An Analysis of the Academ-AI Dataset. arXiv:2411.15218; 2024 [Preprint]. doi: [10.48550/arXiv.2411.15218](https://doi.org/10.48550/arXiv.2411.15218)
 
 The `reproduce.qmd` file provides instructions (with R code) for reproducing the results of the investigation. To run the code, users must obtain an API key from [Open Exchange Rates](https://openexchangerates.org), which must be stored in one of the following two places:
 
