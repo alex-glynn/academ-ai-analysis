@@ -1,7 +1,7 @@
 
 ## Introduction
 
-This repository contains the data used in an analysis of the Academ-AI repository (<https://www.academ-ai.info>). The data are also available from the Open Science Framework.[^osf] The analysis document can be found on arXiv.[^arxiv]
+This repository contains the data and code necessary to reproduce my [analysis](https://doi.org/10.48550/arXiv.2411.15218) of the Academ-AI dataset (<https://www.academ-ai.info>). The data are also available from the Open Science Framework.[^osf] The analysis document can be found on arXiv.[^arxiv]
 
 [^osf]: Glynn A. Academ-AI Analysis. Charlottesville, VA: Open science Framework; 2024. doi:  [10.17605/OSF.IO/S4YGV](https://doi.org/10.17605/OSF.IO/S4YGV)
 
@@ -18,7 +18,7 @@ The `reproduce.qmd` file provides instructions (with R code) for reproducing the
 
 - R programming language ([R Project for Statistical Computing](https://www.r-project.org/), Vienna, Austria)
 - The following R packages, all available via [CRAN](https://cran.r-project.org/):
-	- `box`
+  - `box`
   - `coin`
   - `cowplot`
   - `dplyr`
