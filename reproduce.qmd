@@ -1,0 +1,545 @@
+---
+title: Suspected Undeclared Use of Artificial Intelligence in the Academic Literature
+subtitle: An Analysis of the Academ-AI Dataset
+author: Alex Glynn, MA
+institute: Kornhauser Health Sciences Library, University of Louisville, Louisville, KY, United States of America
+execute:
+  warning: false
+format:
+  html:
+    theme: minty
+    toc: true
+    toc-depth: 4
+    highlight-style: pygments
+    fig-width: 9
+---
+
+## Setup
+
+### Libraries
+
+```{r}
+box::use(
+	coin[wilcox_test],
+	cowplot[theme_cowplot],
+	dplyr[
+		arrange, bind_rows, case_when,
+		desc, filter, group_by,
+		mutate, pull, rename_with,
+		select, summarize, tally,
+		transmute
+	],
+	forcats[fct_rev],
+	ggokabeito[scale_color_okabe_ito, scale_fill_okabe_ito],
+	ggplot2[...],
+	gt[md, opt_footnote_marks],
+	gtsummary[
+		add_p, all_continuous, all_stat_cols,
+		as_gt, modify_footnote, modify_header,
+		tbl_summary
+	],
+	janitor[adorn_pct_formatting, clean_names, tabyl],
+	jsonlite[read_json],
+	labelled[get_variable_labels, set_variable_labels],
+	lemon[facet_rep_grid],
+	lubridate[as_date, as_datetime, ymd],
+	magrittr[...],
+	purrr[map_dbl, map2_dbl],
+	readr[read_csv, read_delim],
+	scales[
+		label_date_short, label_dollar,
+		label_log, label_percent
+	],
+	stringr[
+		str_count, str_detect,
+		str_replace, str_replace_all,
+		str_split, str_sub, str_which
+	],
+	tibble[column_to_rownames],
+	tidyr[drop_na, pivot_longer, replace_na, separate],
+	tidyselect[where, contains, everything, starts_with]
+)
+```
+
+### Data import
+
+Academ-AI data:
+
+```{r}
+df <- read_csv('acai-data.csv') %>%
+    mutate(
+        year = as.numeric(str_sub(date, 1, 4)),
+        c_type = factor(c_type, c('Journal', 'Conference'))
+    )
+```
+
+Foreign exchange data from Open Exchange Rates API:
+
+```{r}
+# API key stored in shell profile
+oxr_key <- Sys.getenv('OPEN_EXCHANGE_RATES')
+query <- sprintf(
+    # for latest exchange rates:
+    'https://openexchangerates.org/api/latest.json?app_id=%s&base=USD',
+    # for exchange rates used in the analysis:
+    # 'https://openexchangerates.org/api/historical/2024-10-30.json?app_id=%s&base=USD',
+    oxr_key
+)
+oer <- read_json(query)
+forex <- oer$rates %>% unlist()
+oer_date <- oer$timestamp %>%
+	as_datetime() %>%
+	as_date()
+```
+
+Directory of Open Access Journals journal-level data from public data dump.[^doaj] 
+
+[^doaj]: Historical data are not available; changes in the DOAJ since my analysis may be reflected in your results. 
+
+```{r}
+doaj <- read_csv('https://doaj.org/csv') %>%
+        clean_names() %>%
+        select(journal_title, contains('issn'), apc, apc_amount) %>%
+        `colnames<-`(c('jrnl', 'pissn', 'oissn', 'apc', 'apc_amount')) %>%
+        mutate(apc_usd = map_dbl(apc_amount, function(amt) {
+            # journals with no APC
+            if (is.na(amt)) return (NA)
+            # separate multiple currencies
+            apcs <- str_split(amt, '; ') %>% unlist()
+            usds <- str_count(amt, 'USD')
+            if (usds == 0) {
+                # if no USD figure, use the first figure available
+                apc <- apcs[1]
+            } else if (usds == 1) {
+                # if one USD figure, use it
+                apc <- apcs[str_which(apcs, 'USD')]
+            } else {
+                # if multiple USD figures available, use the first one
+                apc <- apcs[str_which(apcs, 'USD')][1]
+            }
+            # separate value from currency
+            apc_parts <- str_split(apc, ' ') %>% unlist()
+            value <- as.numeric(apc_parts[1])
+            currency <- apc_parts[2]
+            # convert using OER rates
+            return(value / forex[currency])
+        }))
+```
+
+Scimago Journal Rank (SJR) data from public data dump.[^sjr] 
+
+[^sjr]: Historical data are not available; changes in the SJR database since my analysis may be reflected in your results. 
+
+```{r warning=F}
+sjr <- read_delim('https://www.scimagojr.com/journalrank.php?out=xls', ';') %>%
+        clean_names() %>%
+        select(title, issn, sjr, h_index, starts_with('total'), starts_with('cit')) %>%
+        # separate where there are multiple ISSNs
+        separate(issn, c('issn1', 'issn2'), ', ') %>%
+        mutate(
+                # convert comma decimals to periods; convert to numeric data
+                sjr = as.numeric(str_replace(sjr,',','.')),
+                cites_doc_2years = as.numeric(str_replace(cites_doc_2years, ',','.')),
+                # hyphenate ISSNs to match Academ-AI data
+                issn1 = str_replace(issn1, '(\\d{4})([0-9X]{4})', '\\1-\\2'),
+                issn2 = str_replace(issn2, '(\\d{4})([0-9X]{4})', '\\1-\\2')
+        )
+```
+
+Convert article processing charges (APCs) in Academ-AI data to USD. 
+
+```{r}
+fdf <- df %>%
+    mutate(c_apc_usd = map2_dbl(
+        c_apc_value, c_apc_currency,
+        function(value, curr) {
+            value / forex[curr]
+        }
+    ))
+```
+
+## Descriptive statistics
+
+### Articles/papers by year
+
+```{r}
+count2022 <- sum(fdf$year == 2022) # number of articles/papers published in 2022
+ggplot(fdf, aes(year)) +
+	geom_bar(fill=palette.colors(2)[2]) +
+	theme_cowplot() +
+	scale_y_continuous(breaks=seq(0,300,50), expand=c(0,2)) +
+	scale_x_continuous(breaks=2013:2024) +
+	labs(x='Year of alleged publication', y = 'Articles/papers (n)') +
+	annotate(geom='text', x=2022, y=100, label='ChatGPT public release', hjust=1) +
+	annotate(
+		geom='segment', x=2022, xend=2022, y=90, yend=count2022,
+		arrow=arrow(type='closed', length=unit(.15, 'inches'))
+	)
+```
+
+### Articles/papers per journal/conference
+
+```{r}
+fdf %>%
+	group_by(c_type, c_title) %>%
+	tally() %>%
+	ggplot(aes(n)) +
+		geom_bar(aes(fill=c_type), show.legend = F) +
+		scale_x_continuous(breaks=1:18, expand=c(0,.1)) +
+		scale_y_continuous(breaks=seq(0,300,50), expand=c(0,2)) +
+		scale_fill_okabe_ito() +
+		facet_rep_grid(
+			. ~ c_type,
+			scales='free', space='free',
+			repeat.tick.labels = 'left'
+		) +
+			theme_cowplot() +
+			theme(strip.background=element_blank()) +
+			labs(x='Articles/papers (n)', y='Journals/conferences (n)')
+```
+
+### Articles/papers by publisher
+
+```{r}
+# order by number of items
+publisher_ord <- fdf %>%
+	group_by(c_publisher_std) %>%
+	tally() %>%
+	arrange(desc(n)) %>%
+	drop_na() %>%
+	pull(c_publisher_std)
+# plot
+fdf %>%
+	mutate(c_publisher_std = factor(c_publisher_std, publisher_ord)) %>%
+	select(key, c_type, c_publisher_std) %>%
+	drop_na() %>%
+	ggplot(aes(c_publisher_std)) +
+	geom_bar(aes(fill=fct_rev(c_type))) +
+	scale_fill_manual(values=palette.colors(3)[3:2]) +
+	theme_cowplot() +
+	labs(x='', y='Articles/papers (n)', fill='') +
+	theme(
+		legend.position = 'inside',
+		legend.position.inside=c(.7,.7),
+		axis.text.x = element_text(angle=45, hjust=1)
+	)
+```
+
+### Article processing charges
+
+#### By publisher
+
+```{r}
+pub_by_mdn_apc <- fdf %>%
+	group_by(c_publisher_std) %>%
+	summarize(mdn = median(c_apc_usd, na.rm=T)) %>%
+	replace_na(list(c_publisher_std = 'Other')) %>%
+	drop_na() %>%
+	arrange(desc(mdn)) %>%
+	pull(c_publisher_std)
+boxcol <- palette.colors(4)[4]
+fdf %>%
+	replace_na(list(c_publisher_std = 'Other')) %>%
+	mutate(c_publisher_std = factor(c_publisher_std, pub_by_mdn_apc)) %>%
+	filter(!is.na(c_apc_usd), c_apc_usd > 0) %>%
+	ggplot(aes(y=c_apc_usd)) +
+	geom_boxplot(
+		aes(x=c_publisher_std),
+		fill=boxcol,
+		color=boxcol,
+		alpha=.3
+	) +
+		theme_cowplot() +
+		theme(
+			legend.position='none',
+			axis.text.x = element_text(angle=45, hjust=1)
+		) +
+			labs(x='', y='Charge to authors (USD)') +
+			scale_y_continuous(
+				breaks=seq(0,5000,1000),
+				labels = label_dollar()
+			)
+```
+
+#### Dichotomous: major publishers vs. others
+
+```{r}
+wilcox.test(c_apc_usd ~ c_publisher_major, data=fdf)
+```
+
+## Comparisons
+
+### DOAJ comparison
+
+```{r}
+in_doaj <- fdf %>%
+	filter(c_type=='Journal') %>%
+	mutate(in_doaj = ifelse(str_detect(c_indexing, 'DOAJ'), 1, 0)) %>%
+	select(c_title, in_doaj)
+articles_in_doaj <- in_doaj %>%
+	tabyl(in_doaj) %>%
+	adorn_pct_formatting() %>%
+	filter(in_doaj == 1)
+journals_in_doaj <- in_doaj %>%
+	unique() %>%
+	tabyl(in_doaj) %>%
+	adorn_pct_formatting() %>%
+	filter(in_doaj == 1)
+fdf_in_doaj <- fdf %>%
+	filter(str_detect(c_indexing, 'DOAJ')) %>%
+	transmute(
+		jrnl = c_title,
+		issn = c_isn,
+		apc = case_when(
+			c_apc_model %in% c('Full', 'Hybrid') ~ 'Yes',
+			c_apc_model == 'None' ~ 'No',
+			T ~ NA
+		),
+		apc_usd = c_apc_usd
+	) %>%
+		unique()
+doaj_not_fdf <- doaj %>%
+	filter(!pissn %in% fdf_in_doaj$issn, !oissn %in% fdf_in_doaj$issn) %>%
+	select(jrnl, apc, apc_usd) %>%
+	mutate(acai = 'Other')
+fdf_in_doaj <- fdf_in_doaj %>%
+	select(-issn) %>%
+	mutate(acai = 'Academ-AI')
+doaj_comp <- bind_rows(fdf_in_doaj, doaj_not_fdf)
+xt <- xtabs(~acai + apc, data=doaj_comp)
+```
+
+#### Number of journals with APCs: Academ-AI vs. rest of DOAJ
+
+```{r}
+chisq.test(xt)
+```
+
+#### Median APC: Academ-AI vs. rest of DOAJ
+
+```{r}
+wilcox.test(apc_usd ~ acai, data=doaj_comp)
+```
+
+#### APC distribution: Academ-AI vs. rest of DOAJ
+
+```{r}
+ggplot(doaj_comp, aes(apc_usd, acai)) +
+	geom_violin(na.rm=T, aes(fill=acai, color=acai), show.legend=F, draw_quantiles = c(.25, .75), linetype='dashed') +
+	geom_violin(na.rm=T, fill='transparent', aes(color=acai), show.legend=F, draw_quantiles=.5) +
+		scale_fill_okabe_ito(alpha=.2) +
+		scale_color_okabe_ito() +
+		scale_x_continuous(
+			breaks=seq(0,9000,1000),
+			labels=label_dollar()
+		) +
+		theme_cowplot() +
+		labs(x='APC (USD)', y='')
+```
+
+### SJR comparison
+
+```{r}
+in_sjr <- fdf %>%
+	filter(c_type == 'Journal') %>%
+	mutate(in_sjr = ifelse(
+		c_isn_valid != 'Refers to different journal' &
+			(c_isn %in% sjr$issn1 | c_isn %in% sjr$issn2),
+			1, 0
+		)
+	) %>%
+	select(c_title, in_sjr)
+in_sjr_articles <- in_sjr %>%
+	tabyl(in_sjr) %>%
+	adorn_pct_formatting() %>%
+	filter(in_sjr == 1) %>%
+	mutate(in_sjr = 'articles')
+in_sjr_journals <- in_sjr %>%
+	unique() %>%
+	tabyl(in_sjr) %>%
+	adorn_pct_formatting() %>%
+	filter(in_sjr == 1) %>%
+	mutate(in_sjr = 'journals')
+in_sjr <- bind_rows(in_sjr_articles, in_sjr_journals) %>%
+	column_to_rownames('in_sjr')
+fdf_in_sjr <- fdf %>%
+	filter(
+		c_isn_valid != 'Refers to different journal',
+		c_isn %in% sjr$issn1 | c_isn %in% sjr$issn2
+	) %>%
+		pull(c_isn)
+sjr_by_fdf <- sjr %>%
+	mutate(acai = ifelse(
+		issn1 %in% fdf_in_sjr | issn2 %in% fdf_in_sjr,
+		'Academ-AI',
+		'Other'
+	)) %>%
+	mutate(cites_doc_3years = ifelse(
+		citable_docs_3years > 0,
+		total_cites_3years / total_docs_3years,
+		0
+	)) %>%
+	select(-issn1, -issn2, -cites_doc_2years, -citable_docs_3years, -total_refs) %>%
+	set_variable_labels(
+		title = 'Journal',
+		acai =  'In Academ-AI',
+		sjr = 'SJR',
+		h_index = 'h-index',
+		total_docs_2023 = 'Documents published in 2023',
+		total_docs_3years = 'Documents published 2020–2022',
+		total_cites_3years = '2023 citations to documents published in 2020–2022',
+		cites_doc_3years = 'Citations per document published 2020–2022'
+	)
+sjr_by_fdf %>%
+	select(-title) %>%
+	tbl_summary(
+		by=acai,
+		statistic = list(all_continuous() ~ '{median} [{p25}–{p75}]'),
+		missing_text = 'No data'
+	) %>%
+	add_p() %>%
+	modify_header(
+		label = 'Metric',
+		p.value = md('*P*'),
+		all_stat_cols() ~ '{level}\n(*n*={style_number(n)})'
+	) %>%
+	modify_footnote(all_stat_cols() ~ 'Median [IQR]') %>%
+	as_gt() %>%
+	opt_footnote_marks(marks = "standard")
+```
+
+```{r fig.height=25}
+lbls <- get_variable_labels(sjr_by_fdf) %>% unlist()
+sjr_by_fdf %>%
+	pivot_longer(where(is.numeric), names_to='Metric', values_to='Value') %>%
+	mutate(Metric = lbls[Metric]) %>%
+	filter(Value!=0) %>%
+	mutate(acai = factor(acai, c('Other', 'Academ-AI'))) %>%
+	ggplot(aes(Value, acai)) +
+	geom_violin(aes(fill=acai,color=acai), draw_quantiles = c(.25, .75), linetype='dashed') +
+	geom_violin(aes(color=acai), fill='transparent', draw_quantiles=.5) +
+	scale_x_log10(labels = label_log()) +
+	scale_fill_okabe_ito(alpha=.2) +
+	scale_color_okabe_ito() +
+	theme_cowplot() +
+	labs(x='', y='') +
+	theme(
+		legend.position='none',
+		strip.placement='outside',
+		strip.background = element_blank()
+	) +
+    facet_wrap(. ~ Metric, ncol=1, nrow=6, scales='free_x', strip.position='bottom')
+```
+
+## Textual features
+
+```{r}
+tlbl <- c(
+		update = 'Model update',
+		regenerate = '"Regenerate response"',
+		certainly = '"Certainly, here..."',
+		langmod = 'Language model',
+		access = 'Lack of access',
+		first_person = 'First person singular',
+		second_person = 'Second person',
+		recent = 'Referal to recent sources'
+	)
+tbl <- fdf %>%
+	select(starts_with('t_')) %>%
+	rename_with(~sub('t_', '', .)) %>%
+	pivot_longer(
+		everything(),
+		names_to = 'feature',
+		values_to = 'has_feature'
+	)  %>%
+	group_by(feature) %>%
+	summarize(n=sum(has_feature)) %>%
+	arrange(n) %>%
+	mutate(
+		p = n/nrow(fdf),
+		pref = sprintf('%.1f%%', p*100),
+		lab = sprintf('%s (%s)', n, pref)
+	)
+tbl_ref <- tbl %>%
+	column_to_rownames('feature')
+tbl_plt <- tbl %>%
+	mutate(feature = factor(feature, feature, tlbl[feature]))
+tbl_plt %>%
+	ggplot(aes(p, feature)) +
+	geom_col(aes(fill=feature)) +
+	geom_text(aes(x=.8, label=lab), hjust=1) +
+	theme_cowplot() +
+	scale_fill_okabe_ito(order=9:1) +
+	scale_x_continuous(
+		expand=c(0,0),
+		breaks = 0:10/10,
+		labels=label_percent(),
+		limits=c(0,.85)
+	) +
+		labs(y='', x='Proportion of articles/papers') +
+		theme(legend.position = 'none')
+```
+
+### Corrections
+
+```{r}
+corrections <- fdf %>%
+	select(key, date, c_title, e_type, e_date) %>%
+	filter(e_type != '') %>%
+	mutate(
+		date = ymd(date),
+		e_date = ymd(e_date),
+		ttcorr = e_date - date,
+		c_title = c(
+			'Nat Lang Process J',
+			'Ann Med Surg',
+			'Radiol Case Rep',
+			'Inf Fusion',
+			'Front Cell Dev Biol',
+			'Eur J Mass Spectrom',
+			'Environ Sci Pollut Res',
+			'Toxicology',
+			'J Res Lect Eng',
+			'PLoS One',
+			'Phys Scr',
+			'Toxins',
+			'Afr Secur Rev',
+			'Resour Policy',
+			'Surf Interfaces'
+		)
+	) %>%
+	drop_na() %>%
+	mutate(e_type = str_replace_all(e_type, c(
+		'Stealth revision, ' = '',
+		'Corrigendum|Erratum' = 'Correction'
+	)))
+corrections %>%
+	ggplot(aes(e_date, reorder(c_title, ttcorr))) +
+	geom_segment(
+		aes(xend=date),
+		arrow=arrow(angle=90, length=unit(7, 'pt'))
+	) +
+		geom_point(aes(shape=e_type), size=3) +
+		geom_text(aes(label=paste0(ttcorr, ' days')), hjust=0, nudge_x=10) +
+		theme_cowplot() +
+		scale_x_date(
+			breaks='2 months',
+			labels=label_date_short(format = c('%Y', '%b', '', '')),
+			limits = as.Date(c('2023-03-01', '2024-12-01')),
+			expand=c(0,0)
+		) +
+			labs(x='', y='', shape='') +
+			theme(
+				legend.position = 'inside',
+				legend.position.inside = c(.825, .15),
+				axis.text.y = element_text(face='italic')
+			)
+```
+
+#### Time to correction: corrections vs. retractions
+
+
+```{r}
+# Wilcoxon test with ties:
+wilcox_test(as.numeric(ttcorr) ~ factor(e_type), data=corrections)
+```
